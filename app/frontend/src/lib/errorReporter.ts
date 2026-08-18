@@ -78,6 +78,29 @@ class ErrorReporter {
       console.warn("Failed to send client error report:", sendError, errorPayload);
     }
   }
+
+  /**
+   * Convenience wrapper for realtime provider failures (issue #526).
+   *
+   * Attaches a `type: "realtime"` tag to the context so errors from
+   * WebSocket / reconnect paths can be filtered in telemetry dashboards
+   * without changing the shape of captureError.
+   *
+   * @param error  - The underlying error (e.g. a Socket.io connect_error).
+   * @param context - Optional additional context (e.g. wsUrl, attempt count).
+   */
+  reportRealtimeError(error: Error, context?: Omit<ErrorContext, "extra"> & { extra?: Record<string, unknown> }): void {
+    const enrichedContext: ErrorContext = {
+      ...context,
+      extra: {
+        type: "realtime",
+        ...context?.extra,
+      },
+    };
+
+    // Fire-and-forget — realtime errors should not block the UI.
+    void this.captureError(error, enrichedContext);
+  }
 }
 
 export const errorReporter = new ErrorReporter();

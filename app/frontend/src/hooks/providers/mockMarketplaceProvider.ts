@@ -3,6 +3,14 @@
  *
  * Used in local dev (NEXT_PUBLIC_API_MOCK=true) and in unit/integration
  * tests. All data is self-contained; no network calls are made.
+ *
+ * Lifecycle hardening (issue #526):
+ *   - In-flight promises are tracked alongside the cache entries so that
+ *     calling resetMockMarketplaceCache() while a fetch is still pending
+ *     does not cause the stale in-flight promise to populate a freshly-
+ *     cleared cache.  Any caller that was awaiting the cleared fetch will
+ *     still receive the data; new callers after the reset will start a
+ *     fresh fetch.
  */
 
 import type {
@@ -163,37 +171,81 @@ let cachedListings: MarketplaceListing[] | null = null;
 let cachedUserBids: UserBid[] | null = null;
 let cachedUserListings: UserListing[] | null = null;
 
+/**
+ * In-flight promise tracking (issue #526).
+ *
+ * If resetMockMarketplaceCache() is called while a fetch is pending, the
+ * in-flight promise must NOT write to the (now cleared) cache variables on
+ * settlement — otherwise the reset is silently undone.  We track the active
+ * promise here and compare identity at resolution time; if the slot has been
+ * cleared the write is skipped.
+ */
+let inflight: {
+  listings: Promise<MarketplaceListing[]> | null;
+  userBids: Promise<UserBid[]> | null;
+  userListings: Promise<UserListing[]> | null;
+} = { listings: null, userBids: null, userListings: null };
+
 // ── Provider implementation ──────────────────────────────────────────────────
 
 export const mockMarketplaceProvider: MarketplaceApiProvider = {
   async fetchListings(): Promise<MarketplaceListing[]> {
     if (cachedListings) return cachedListings;
-    return new Promise((resolve) =>
+
+    // Return the existing in-flight promise to avoid launching two simultaneous
+    // fetches when multiple callers race before the first one settles.
+    if (inflight.listings) return inflight.listings;
+
+    const promise = new Promise<MarketplaceListing[]>((resolve) =>
       setTimeout(() => {
-        cachedListings = MOCK_LISTINGS;
+        // Only write back if this promise is still the active one — i.e. the
+        // cache has not been reset while we were "in-flight" (issue #526).
+        if (inflight.listings === promise) {
+          cachedListings = MOCK_LISTINGS;
+          inflight.listings = null;
+        }
         resolve(MOCK_LISTINGS);
       }, 900),
     );
+
+    inflight.listings = promise;
+    return promise;
   },
 
   async fetchUserBids(): Promise<UserBid[]> {
     if (cachedUserBids) return cachedUserBids;
-    return new Promise((resolve) =>
+    if (inflight.userBids) return inflight.userBids;
+
+    const promise = new Promise<UserBid[]>((resolve) =>
       setTimeout(() => {
-        cachedUserBids = MOCK_USER_BIDS;
+        if (inflight.userBids === promise) {
+          cachedUserBids = MOCK_USER_BIDS;
+          inflight.userBids = null;
+        }
         resolve(MOCK_USER_BIDS);
       }, 700),
     );
+
+    inflight.userBids = promise;
+    return promise;
   },
 
   async fetchUserListings(): Promise<UserListing[]> {
     if (cachedUserListings) return cachedUserListings;
-    return new Promise((resolve) =>
+    if (inflight.userListings) return inflight.userListings;
+
+    const promise = new Promise<UserListing[]>((resolve) =>
       setTimeout(() => {
-        cachedUserListings = MOCK_USER_LISTINGS;
+        if (inflight.userListings === promise) {
+          cachedUserListings = MOCK_USER_LISTINGS;
+          inflight.userListings = null;
+        }
         resolve(MOCK_USER_LISTINGS);
       }, 700),
     );
+
+    inflight.userListings = promise;
+    return promise;
   },
 
   async placeBid(username: string, amount: number): Promise<BidResult> {
@@ -225,11 +277,18 @@ export const mockMarketplaceProvider: MarketplaceApiProvider = {
 };
 
 /**
- * Reset the in-memory cache between tests so each test starts fresh.
+ * Reset the in-memory cache AND in-flight promise references between tests
+ * so each test starts fresh (issue #526).
+ *
  * Call this in a `beforeEach` or `afterEach` inside your test suite.
+ * Any promise that was already in-flight will still resolve for existing
+ * awaiting callers, but will not repopulate the cleared cache.
  */
 export function resetMockMarketplaceCache(): void {
   cachedListings = null;
   cachedUserBids = null;
   cachedUserListings = null;
+  // Clearing the inflight refs prevents stale promises from writing back
+  // to the now-fresh cache slots (issue #526).
+  inflight = { listings: null, userBids: null, userListings: null };
 }

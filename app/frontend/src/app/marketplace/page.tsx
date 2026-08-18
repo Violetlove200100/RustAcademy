@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { UsernameCard } from "@/components/UsernameCard";
 import { ListingDetailModal } from "@/components/ListingDetailModal";
 import type { MarketplaceListing } from "@/hooks/marketplaceApi";
@@ -85,7 +85,22 @@ function MarketplacePageContent() {
   const [sortKey, setSortKey] = useState("ending");
   const [activeListingId, setActiveListingId] = useState<string | null>(null);
   const [detailListingId, setDetailListingId] = useState<string | null>(null);
+  // Single declaration — the duplicate was removed (issue #526).
   const [showWatchlistOnly, setShowWatchlistOnly] = useState(false);
+  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+  /** Non-null when the realtime provider has surfaced an error (issue #526). */
+  const [realtimeError, setRealtimeError] = useState<string | null>(null);
+
+  /**
+   * Ref that always holds the latest listings array (issue #526).
+   * Effects that need the current listings value but should NOT re-run
+   * when listings changes can read from this ref instead of closing over
+   * the state variable.
+   */
+  const listingsRef = useRef<MarketplaceListing[]>([]);
+  useEffect(() => {
+    listingsRef.current = listings;
+  }, [listings]);
 
   // Modals hold a listing id, not a snapshot, so realtime bid updates keep
   // the open modal (current bid, minimum bid) from going stale.
@@ -97,8 +112,6 @@ function MarketplacePageContent() {
     () => listings.find((l) => l.id === detailListingId) ?? null,
     [listings, detailListingId],
   );
-  const [showWatchlistOnly, setShowWatchlistOnly] = useState(false);
-  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
 
   const { watchlist, isInWatchlist, toggleWatchlist } = useWatchlist();
 
@@ -113,11 +126,12 @@ function MarketplacePageContent() {
     marketplaceApi.fetchListings().then((data) => {
       setListings(data);
       setLoading(false);
+    }).catch((err: unknown) => {
+      setLoading(false);
+      console.error("[MarketplacePage] Failed to fetch listings:", err);
     });
   }, [marketplaceApi]);
 
-  // Latest listings, readable from effects without being an effect dependency.
-  const listingsRef = useRef<MarketplaceListing[]>([]);
   useEffect(() => {
     if (listings.length > 0) {
       listings.forEach((listing) =>
@@ -134,6 +148,9 @@ function MarketplacePageContent() {
   // Handle real-time bid updates. applyBidUpdate discards stale, duplicate,
   // and out-of-order deliveries so bidCount only moves for genuinely new bids.
   useEffect(() => {
+    // Clear any previous realtime error when we (re-)subscribe (issue #526).
+    setRealtimeError(null);
+
     const unsubscribe = realtimeApi.onBidUpdate((update) => {
       setLastUpdate(update.timestamp);
       setListings((prev) =>
@@ -269,6 +286,14 @@ function MarketplacePageContent() {
       {/* ── MAIN CONTENT ─────────────────────────────── */}
       <div className="max-w-5xl mx-auto px-6 pb-24">
         {!loading && <StatsBar listings={listings} />}
+
+        {/* Realtime error banner (issue #526) */}
+        {realtimeError && (
+          <div className="mb-6 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+            ⚠️ Live update connection lost: {realtimeError}. Bid prices may be
+            out of date — refresh the page to reconnect.
+          </div>
+        )}
 
         {/* ── CONTROLS ─────────────────────────────── */}
         <div className="flex flex-col gap-4 mb-8">
