@@ -6,6 +6,14 @@
  *
  * In tests you typically do NOT want the interval firing; pass
  * `autoStart = false` and call `triggerBidUpdate()` manually instead.
+ *
+ * Lifecycle hardening (issue #526):
+ *   - disconnect() clears the listeners array so stale callbacks do not
+ *     accumulate across reconnects.
+ *   - triggerBidUpdate() is a no-op when the provider is disconnected so
+ *     test helpers cannot accidentally deliver updates after teardown.
+ *   - Iterates a snapshot of listeners in _emitRandomUpdate / triggerBidUpdate
+ *     so unsubscribing inside a callback is safe.
  */
 
 import type { BidUpdate, RealtimeApiProvider } from "@/hooks/realtimeApi";
@@ -41,6 +49,9 @@ export class MockRealtimeProvider implements RealtimeApiProvider {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
+    // Clear all registered listeners so stale callbacks cannot fire after
+    // the provider is torn down and re-connected (issue #526).
+    this.listeners = [];
   }
 
   subscribeToListing(listingId: string): void {
@@ -66,9 +77,14 @@ export class MockRealtimeProvider implements RealtimeApiProvider {
   /**
    * Imperatively emit a bid update — handy in unit tests where you
    * want full control over what arrives over the "wire".
+   *
+   * No-ops when the provider is disconnected so test helpers cannot
+   * accidentally deliver updates after teardown (issue #526).
    */
   triggerBidUpdate(update: BidUpdate): void {
-    this.listeners.forEach((cb) => cb(update));
+    if (!this._isConnected) return;
+    // Snapshot the array so that unsubscribing inside a callback is safe.
+    [...this.listeners].forEach((cb) => cb(update));
   }
 
   private _emitRandomUpdate(): void {
@@ -87,7 +103,8 @@ export class MockRealtimeProvider implements RealtimeApiProvider {
       timestamp: new Date(),
     };
 
-    this.listeners.forEach((cb) => cb(update));
+    // Snapshot the array so that unsubscribing inside a callback is safe.
+    [...this.listeners].forEach((cb) => cb(update));
   }
 }
 
