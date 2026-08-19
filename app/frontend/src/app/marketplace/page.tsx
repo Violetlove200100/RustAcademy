@@ -12,6 +12,7 @@ import Link from "next/link";
 import { WatchlistProvider } from "@/contexts/WatchlistContext";
 import { MarketplaceApiProvider } from "@/hooks/MarketplaceApiContext";
 import { RealtimeApiProvider } from "@/hooks/RealtimeApiContext";
+import { applyBidUpdate, applyLocalBid } from "@/lib/bidUpdates";
 
 const BidModal = dynamic(
   () => import("@/components/BidModal").then((mod) => mod.BidModal),
@@ -132,21 +133,22 @@ function MarketplacePageContent() {
     });
   }, [marketplaceApi]);
 
+  // Subscribe to each listing once after the initial fetch.
+  // We read listing IDs from the ref so this effect only runs when the
+  // realtimeApi instance changes — not on every bid update (issue #526).
   useEffect(() => {
-    if (listings.length > 0) {
-      listings.forEach((listing) =>
-        realtimeApi.subscribeToListing(listing.id),
-      );
-      return () => {
-        listings.forEach((listing) =>
-          realtimeApi.unsubscribeFromListing(listing.id),
-        );
-      };
-    }
-  }, [listings, realtimeApi]);
+    const ids = listingsRef.current.map((l) => l.id);
+    if (ids.length === 0) return;
+    ids.forEach((id) => realtimeApi.subscribeToListing(id));
+    return () => {
+      ids.forEach((id) => realtimeApi.unsubscribeFromListing(id));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [realtimeApi, loading]); // re-run when the provider changes or after the initial load
 
-  // Handle real-time bid updates. applyBidUpdate discards stale, duplicate,
-  // and out-of-order deliveries so bidCount only moves for genuinely new bids.
+  // Handle real-time bid updates. applyBidUpdate (from lib/bidUpdates.ts)
+  // discards stale, duplicate, and out-of-order deliveries so bidCount only
+  // moves for genuinely new bids (issue #526).
   useEffect(() => {
     // Clear any previous realtime error when we (re-)subscribe (issue #526).
     setRealtimeError(null);
@@ -154,30 +156,24 @@ function MarketplacePageContent() {
     const unsubscribe = realtimeApi.onBidUpdate((update) => {
       setLastUpdate(update.timestamp);
       setListings((prev) =>
-        prev.map((listing) =>
-          listing.id === update.listingId
-            ? {
-                ...listing,
-                currentBid: Math.max(listing.currentBid, update.newBid),
-                bidCount: listing.bidCount + 1,
-              }
-            : listing,
-        ),
+        applyBidUpdate(prev, {
+          listingId: update.listingId,
+          newBid: update.newBid,
+          bidCount: update.bidCount,
+        }),
       );
     });
 
     return unsubscribe;
   }, [realtimeApi]);
 
+  // Apply a bid the local user just placed using the same monotonic guard as
+  // realtime updates. This prevents a racing websocket echo from double-
+  // counting the bid, and stops a higher realtime update from being regressed
+  // by the local bid amount (issue #526).
   const handleBidSuccess = useCallback(
     (username: string, amount: number) => {
-      setListings((prev) =>
-        prev.map((l) =>
-          l.username === username
-            ? { ...l, currentBid: amount, bidCount: l.bidCount + 1 }
-            : l,
-        ),
-      );
+      setListings((prev) => applyLocalBid(prev, username, amount));
     },
     [],
   );

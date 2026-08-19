@@ -15,6 +15,12 @@ export type BidUpdate = {
   newBid: number;
   bidderAddress: string;
   timestamp: Date;
+  /**
+   * Authoritative total bid count supplied by the server.
+   * When present, applyBidUpdate uses this value directly instead of
+   * incrementing the local counter — prevents count drift on reconnect.
+   */
+  bidCount?: number;
 };
 
 /**
