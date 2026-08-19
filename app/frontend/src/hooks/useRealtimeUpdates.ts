@@ -48,6 +48,9 @@ export class MockWebSocket {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
+    // Clear all listeners on disconnect so stale callbacks do not accumulate
+    // across reconnects (issue #526).
+    this.listeners = [];
   }
 
   subscribe(listingId: string, currentBid?: number) {
@@ -65,6 +68,17 @@ export class MockWebSocket {
   }
 
   onBidUpdate(callback: (update: BidUpdate) => void) {
+    // Guard against duplicate registrations of the same function reference
+    // (issue #526) — prevents stale callbacks from accumulating when callers
+    // register without first calling the returned unsubscribe.
+    if (this.listeners.includes(callback)) {
+      return () => {
+        const index = this.listeners.indexOf(callback);
+        if (index > -1) {
+          this.listeners.splice(index, 1);
+        }
+      };
+    }
     this.listeners.push(callback);
     return () => {
       const index = this.listeners.indexOf(callback);
@@ -100,7 +114,8 @@ export class MockWebSocket {
       timestamp: new Date()
     };
 
-    this.listeners.forEach(listener => listener(update));
+    // Iterate a snapshot so unsubscribing inside a callback is safe (issue #526).
+    [...this.listeners].forEach(listener => listener(update));
   }
 
   get connectionStatus() {
