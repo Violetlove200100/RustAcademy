@@ -12,9 +12,15 @@ type BidUpdate = {
   bidCount?: number;
 };
 
+type RealtimeStatus = {
+  isConnected: boolean;
+  error: string | null;
+};
+
 type RealtimeUpdatesHook = {
   isConnected: boolean;
   lastUpdate: Date | null;
+  realtimeError: string | null;
   subscribeToListing: (listingId: string, currentBid?: number) => void;
   unsubscribeFromListing: (listingId: string) => void;
   onBidUpdate: (callback: (update: BidUpdate) => void) => () => void;
@@ -26,13 +32,17 @@ type RealtimeUpdatesHook = {
 // consumers must guard before applying updates (see lib/bidUpdates.ts).
 export class MockWebSocket {
   private listeners: ((update: BidUpdate) => void)[] = [];
+  private statusListeners: ((status: RealtimeStatus) => void)[] = [];
   private subscribedListings: Set<string> = new Set();
   private lastBids: Map<string, number> = new Map();
   private intervalId: NodeJS.Timeout | null = null;
   private isConnected = false;
+  private lastError: string | null = null;
 
   connect() {
     this.isConnected = true;
+    this.lastError = null;
+    this._emitStatus();
 
     // Simulate periodic bid updates
     this.intervalId = setInterval(() => {
@@ -48,9 +58,13 @@ export class MockWebSocket {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
+    // Emit the disconnected status BEFORE clearing listeners so any
+    // subscriber that wants to react can do so (issue #526).
+    this._emitStatus();
     // Clear all listeners on disconnect so stale callbacks do not accumulate
     // across reconnects (issue #526).
     this.listeners = [];
+    this.statusListeners = [];
   }
 
   subscribe(listingId: string, currentBid?: number) {
@@ -88,6 +102,16 @@ export class MockWebSocket {
     };
   }
 
+  onStatusChange(callback: (status: RealtimeStatus) => void): () => void {
+    this.statusListeners.push(callback);
+    // Emit current status immediately so callers don't have to wait for a transition.
+    callback({ isConnected: this.isConnected, error: this.lastError });
+    return () => {
+      const idx = this.statusListeners.indexOf(callback);
+      if (idx > -1) this.statusListeners.splice(idx, 1);
+    };
+  }
+
   private simulateBidUpdate() {
     const subscribedArray = Array.from(this.subscribedListings);
     if (subscribedArray.length === 0) return;
@@ -121,20 +145,32 @@ export class MockWebSocket {
   get connectionStatus() {
     return this.isConnected;
   }
+
+  private _emitStatus(): void {
+    const status: RealtimeStatus = { isConnected: this.isConnected, error: this.lastError };
+    [...this.statusListeners].forEach((cb) => cb(status));
+  }
 }
 
 // Singleton instance
 const mockWebSocket = new MockWebSocket();
 
 export function useRealtimeUpdates(): RealtimeUpdatesHook {
-  const [isConnected, setIsConnected] = useState(false);
+  const [isConnected, setIsConnected] = useState(mockWebSocket.connectionStatus);
+  const [realtimeError, setRealtimeError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
 
   useEffect(() => {
     mockWebSocket.connect();
-    setIsConnected(mockWebSocket.connectionStatus);
+
+    // Reactive status subscription (issue #526).
+    const unsubscribeStatus = mockWebSocket.onStatusChange((status) => {
+      setIsConnected(status.isConnected);
+      setRealtimeError(status.error);
+    });
 
     return () => {
+      unsubscribeStatus();
       mockWebSocket.disconnect();
     };
   }, []);
@@ -159,10 +195,11 @@ export function useRealtimeUpdates(): RealtimeUpdatesHook {
 
   return {
     isConnected,
+    realtimeError,
     lastUpdate,
     subscribeToListing,
     unsubscribeFromListing,
-    onBidUpdate
+    onBidUpdate,
   };
 }
 

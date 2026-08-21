@@ -30,9 +30,10 @@ import {
   useContext,
   useEffect,
   useRef,
+  useState,
   type ReactNode,
 } from "react";
-import type { RealtimeApiProvider } from "@/hooks/realtimeApi";
+import type { RealtimeApiProvider, RealtimeStatus } from "@/hooks/realtimeApi";
 import { mockRealtimeProvider } from "@/hooks/providers/mockRealtimeProvider";
 import { productionRealtimeProvider } from "@/hooks/providers/productionRealtimeProvider";
 
@@ -91,4 +92,26 @@ export function RealtimeApiProvider({
 
 export function useRealtimeApi(): RealtimeApiProvider {
   return useContext(RealtimeApiContext);
+}
+
+/**
+ * Reactive connection status (issue #526).
+ *
+ * Subscribes to the provider's onStatusChange stream so components re-render
+ * when the transport connects, disconnects, or fails — without polling
+ * `isConnected` (a one-shot read that never triggers a re-render on its own).
+ */
+export function useRealtimeStatus(): RealtimeStatus {
+  const provider = useContext(RealtimeApiContext);
+  const [status, setStatus] = useState<RealtimeStatus>(() => ({
+    isConnected: provider.isConnected,
+    error: null,
+  }));
+
+  useEffect(() => {
+    const unsubscribe = provider.onStatusChange(setStatus);
+    return unsubscribe;
+  }, [provider]);
+
+  return status;
 }

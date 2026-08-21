@@ -21,7 +21,7 @@
  *     and reports the failure via errorReporter after every attempt.
  */
 
-import type { BidUpdate, RealtimeApiProvider } from "@/hooks/realtimeApi";
+import type { BidUpdate, RealtimeApiProvider, RealtimeStatus } from "@/hooks/realtimeApi";
 import { errorReporter } from "@/lib/errorReporter";
 
 const getWsUrl = (): string =>
@@ -32,9 +32,11 @@ const BACKOFF_MAX_MS = 30_000;
 
 export class ProductionRealtimeProvider implements RealtimeApiProvider {
   private listeners: ((update: BidUpdate) => void)[] = [];
+  private statusListeners: ((status: RealtimeStatus) => void)[] = [];
   private subscribedListings: Set<string> = new Set();
   private _isConnected = false;
   private _isConnecting = false;
+  private _lastError: string | null = null;
 
   // TODO: replace `unknown` with the actual Socket.io client type once
   //       socket.io-client is imported: `import { Socket } from "socket.io-client"`
@@ -81,6 +83,8 @@ export class ProductionRealtimeProvider implements RealtimeApiProvider {
     this._isConnected = true;
     this._isConnecting = false;
     this.reconnectAttempt = 0;
+    this._lastError = null;
+    this._emitStatus();
   }
 
   disconnect(): void {
@@ -96,9 +100,13 @@ export class ProductionRealtimeProvider implements RealtimeApiProvider {
     this.socket = null;
     this.reconnectAttempt = 0;
 
+    // Emit the disconnected status BEFORE clearing listeners so any
+    // subscriber that wants to react (e.g. show an error banner) can do so.
+    this._emitStatus();
     // Clear all listeners to prevent stale callbacks from accumulating
     // across reconnects (issue #526).
     this.listeners = [];
+    this.statusListeners = [];
   }
 
   subscribeToListing(listingId: string): void {
@@ -123,6 +131,17 @@ export class ProductionRealtimeProvider implements RealtimeApiProvider {
     return () => this._removeListener(callback);
   }
 
+  onStatusChange(callback: (status: RealtimeStatus) => void): () => void {
+    this.statusListeners.push(callback);
+    // Immediately emit the current status so callers receive the initial
+    // value without waiting for a transition (issue #526).
+    callback({ isConnected: this._isConnected, error: this._lastError });
+    return () => {
+      const idx = this.statusListeners.indexOf(callback);
+      if (idx > -1) this.statusListeners.splice(idx, 1);
+    };
+  }
+
   get isConnected(): boolean {
     return this._isConnected;
   }
@@ -139,6 +158,14 @@ export class ProductionRealtimeProvider implements RealtimeApiProvider {
     [...this.listeners].forEach((cb) => cb(update));
   }
 
+  private _emitStatus(): void {
+    const status: RealtimeStatus = {
+      isConnected: this._isConnected,
+      error: this._lastError,
+    };
+    [...this.statusListeners].forEach((cb) => cb(status));
+  }
+
   /**
    * Schedule a reconnect attempt with exponential back-off.
    * Reports each failure to errorReporter so it surfaces in telemetry.
@@ -146,6 +173,8 @@ export class ProductionRealtimeProvider implements RealtimeApiProvider {
   private _scheduleReconnect(cause: Error): void {
     this._isConnected = false;
     this._isConnecting = false;
+    this._lastError = `Connection failed: ${cause.message}`;
+    this._emitStatus();
 
     const delayMs = Math.min(
       BACKOFF_BASE_MS * 2 ** this.reconnectAttempt,

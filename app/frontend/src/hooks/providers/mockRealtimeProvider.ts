@@ -8,21 +8,26 @@
  * `autoStart = false` and call `triggerBidUpdate()` manually instead.
  *
  * Lifecycle hardening (issue #526):
- *   - disconnect() clears the listeners array so stale callbacks do not
- *     accumulate across reconnects.
+ *   - disconnect() clears listeners and status-listeners so stale callbacks
+ *     do not accumulate across reconnects.
  *   - triggerBidUpdate() is a no-op when the provider is disconnected so
  *     test helpers cannot accidentally deliver updates after teardown.
  *   - Iterates a snapshot of listeners in _emitRandomUpdate / triggerBidUpdate
  *     so unsubscribing inside a callback is safe.
+ *   - onStatusChange fires on every connect/disconnect/error so UI can react
+ *     reactively rather than polling isConnected.
+ *   - simulateConnectionError() lets unit tests exercise the error path.
  */
 
-import type { BidUpdate, RealtimeApiProvider } from "@/hooks/realtimeApi";
+import type { BidUpdate, RealtimeApiProvider, RealtimeStatus } from "@/hooks/realtimeApi";
 
 export class MockRealtimeProvider implements RealtimeApiProvider {
   private listeners: ((update: BidUpdate) => void)[] = [];
+  private statusListeners: ((status: RealtimeStatus) => void)[] = [];
   private subscribedListings: Set<string> = new Set();
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private _isConnected = false;
+  private _lastError: string | null = null;
   private readonly autoStart: boolean;
 
   constructor({ autoStart = true }: { autoStart?: boolean } = {}) {
@@ -32,6 +37,8 @@ export class MockRealtimeProvider implements RealtimeApiProvider {
   connect(): void {
     if (this._isConnected) return;
     this._isConnected = true;
+    this._lastError = null;
+    this._emitStatus();
 
     if (this.autoStart) {
       // 30 % chance of emitting a random update every 5 s
@@ -49,9 +56,13 @@ export class MockRealtimeProvider implements RealtimeApiProvider {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
+    // Emit the disconnected status BEFORE clearing listeners so any
+    // subscriber that wants to react (e.g. show an error banner) can do so.
+    this._emitStatus();
     // Clear all registered listeners so stale callbacks cannot fire after
     // the provider is torn down and re-connected (issue #526).
     this.listeners = [];
+    this.statusListeners = [];
   }
 
   subscribeToListing(listingId: string): void {
@@ -67,6 +78,17 @@ export class MockRealtimeProvider implements RealtimeApiProvider {
     return () => {
       const idx = this.listeners.indexOf(callback);
       if (idx > -1) this.listeners.splice(idx, 1);
+    };
+  }
+
+  onStatusChange(callback: (status: RealtimeStatus) => void): () => void {
+    this.statusListeners.push(callback);
+    // Always emit the current status immediately so callers don't have to
+    // wait for the next status transition.
+    callback({ isConnected: this._isConnected, error: this._lastError });
+    return () => {
+      const idx = this.statusListeners.indexOf(callback);
+      if (idx > -1) this.statusListeners.splice(idx, 1);
     };
   }
 
@@ -87,6 +109,19 @@ export class MockRealtimeProvider implements RealtimeApiProvider {
     [...this.listeners].forEach((cb) => cb(update));
   }
 
+  /**
+   * Simulate a connection error (issue #526).
+   *
+   * Fires onStatusChange with isConnected=false and the given message so
+   * unit / integration tests can verify the error-banner path without
+   * needing a real network failure.
+   */
+  simulateConnectionError(message: string): void {
+    this._isConnected = false;
+    this._lastError = message;
+    this._emitStatus();
+  }
+
   private _emitRandomUpdate(): void {
     const ids = Array.from(this.subscribedListings);
     if (ids.length === 0) return;
@@ -105,6 +140,14 @@ export class MockRealtimeProvider implements RealtimeApiProvider {
 
     // Snapshot the array so that unsubscribing inside a callback is safe.
     [...this.listeners].forEach((cb) => cb(update));
+  }
+
+  private _emitStatus(): void {
+    const status: RealtimeStatus = {
+      isConnected: this._isConnected,
+      error: this._lastError,
+    };
+    [...this.statusListeners].forEach((cb) => cb(status));
   }
 }
 

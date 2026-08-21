@@ -24,6 +24,24 @@ export type BidUpdate = {
 };
 
 /**
+ * Snapshot of the realtime transport's health (issue #526).
+ *
+ * Surfaces connection state and the most recent failure so UI can react —
+ * e.g. flip the "Live Updates" indicator red and show an error banner —
+ * instead of relying on a one-shot synchronous read.
+ */
+export type RealtimeStatus = {
+  /** True when the transport has an active connection. */
+  isConnected: boolean;
+  /**
+   * Human-readable description of the last connection failure, or null when
+   * the connection is healthy. Cleared automatically once the provider
+   * recovers.
+   */
+  error: string | null;
+};
+
+/**
  * All real-time operations a provider must implement.
  */
 export interface RealtimeApiProvider {
@@ -44,6 +62,13 @@ export interface RealtimeApiProvider {
    * Returns an unsubscribe function (mirrors the EventEmitter pattern).
    */
   onBidUpdate(callback: (update: BidUpdate) => void): () => void;
+
+  /**
+   * Register a callback for connection-status changes (issue #526).
+   * Fires whenever the provider connects, disconnects, or fails so that
+   * consumers can surface errors in the UI. Returns an unsubscribe function.
+   */
+  onStatusChange(callback: (status: RealtimeStatus) => void): () => void;
 
   /** Whether the connection is currently active. */
   readonly isConnected: boolean;

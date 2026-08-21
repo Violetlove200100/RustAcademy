@@ -12,6 +12,7 @@ import {
   RealtimeApiContext,
   RealtimeApiProvider,
   useRealtimeApi,
+  useRealtimeStatus,
 } from "@/hooks/RealtimeApiContext";
 import { MockRealtimeProvider } from "@/hooks/providers/mockRealtimeProvider";
 import type { BidUpdate } from "@/hooks/realtimeApi";
@@ -137,6 +138,84 @@ describe("onBidUpdate integration", () => {
     });
 
     expect(cb).not.toHaveBeenCalled();
+    unmount();
+  });
+});
+
+// ── useRealtimeStatus hook (issue #526) ───────────────────────────────────────
+
+describe("useRealtimeStatus", () => {
+  it("returns the connected state after mount (provider auto-connects)", () => {
+    const provider = new MockRealtimeProvider({ autoStart: false });
+
+    const { result, unmount } = renderHook(() => useRealtimeStatus(), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <RealtimeApiProvider provider={provider}>{children}</RealtimeApiProvider>
+      ),
+    });
+
+    // RealtimeApiProvider calls connect() on mount, so the provider is connected.
+    expect(result.current).toEqual({ isConnected: true, error: null });
+    unmount();
+  });
+
+  it("updates reactively on connect", async () => {
+    const provider = new MockRealtimeProvider({ autoStart: false });
+
+    const { result, unmount } = renderHook(() => useRealtimeStatus(), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <RealtimeApiProvider provider={provider}>{children}</RealtimeApiProvider>
+      ),
+    });
+
+    act(() => {
+      provider.connect();
+    });
+
+    expect(result.current).toEqual({ isConnected: true, error: null });
+    unmount();
+  });
+
+  it("surfaces error from simulateConnectionError", async () => {
+    const provider = new MockRealtimeProvider({ autoStart: false });
+
+    const { result, unmount } = renderHook(() => useRealtimeStatus(), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <RealtimeApiProvider provider={provider}>{children}</RealtimeApiProvider>
+      ),
+    });
+
+    act(() => {
+      provider.simulateConnectionError("Network timeout");
+    });
+
+    expect(result.current).toEqual({
+      isConnected: false,
+      error: "Network timeout",
+    });
+    unmount();
+  });
+
+  it("clears error on reconnect", async () => {
+    const provider = new MockRealtimeProvider({ autoStart: false });
+
+    const { result, unmount } = renderHook(() => useRealtimeStatus(), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <RealtimeApiProvider provider={provider}>{children}</RealtimeApiProvider>
+      ),
+    });
+
+    act(() => {
+      provider.simulateConnectionError("failure");
+    });
+
+    expect(result.current.error).toBe("failure");
+
+    act(() => {
+      provider.connect();
+    });
+
+    expect(result.current).toEqual({ isConnected: true, error: null });
     unmount();
   });
 });

@@ -29,7 +29,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { MarketplaceListing } from "@/hooks/marketplaceApi";
 import { useMarketplaceApi } from "@/hooks/MarketplaceApiContext";
-import { useRealtimeApi } from "@/hooks/RealtimeApiContext";
+import { useRealtimeApi, useRealtimeStatus } from "@/hooks/RealtimeApiContext";
 import { applyBidUpdate, applyLocalBid } from "@/lib/bidUpdates";
 
 export type UseMarketDataResult = {
@@ -57,7 +57,10 @@ export function useMarketData(): UseMarketDataResult {
   const [listings, setListings] = useState<MarketplaceListing[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
-  const [realtimeError, setRealtimeError] = useState<string | null>(null);
+
+  // Reactive connection status (issue #526) — error updates automatically
+  // when the transport connects, disconnects, or fails.
+  const realtimeStatus = useRealtimeStatus();
 
   /**
    * Ref that always holds the latest listings array (issue #526).
@@ -120,8 +123,6 @@ export function useMarketData(): UseMarketDataResult {
   //   - The error state is cleared on each (re-)subscription so stale banners
   //     disappear automatically when the connection recovers.
   useEffect(() => {
-    setRealtimeError(null);
-
     const unsubscribe = realtimeApi.onBidUpdate((update) => {
       setLastUpdate(update.timestamp);
       setListings((prev) =>
@@ -142,5 +143,5 @@ export function useMarketData(): UseMarketDataResult {
     setListings((prev) => applyLocalBid(prev, username, amount));
   }, []);
 
-  return { listings, loading, lastUpdate, realtimeError, applyBid };
+  return { listings, loading, lastUpdate, realtimeError: realtimeStatus.error, applyBid };
 }

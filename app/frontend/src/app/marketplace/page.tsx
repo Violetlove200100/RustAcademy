@@ -6,7 +6,7 @@ import { UsernameCard } from "@/components/UsernameCard";
 import { ListingDetailModal } from "@/components/ListingDetailModal";
 import type { MarketplaceListing } from "@/hooks/marketplaceApi";
 import { useMarketplaceApi } from "@/hooks/MarketplaceApiContext";
-import { useRealtimeApi } from "@/hooks/RealtimeApiContext";
+import { useRealtimeApi, useRealtimeStatus } from "@/hooks/RealtimeApiContext";
 import { useWatchlist } from "@/contexts/WatchlistContext";
 import Link from "next/link";
 import { WatchlistProvider } from "@/contexts/WatchlistContext";
@@ -120,8 +120,9 @@ function MarketplacePageContent() {
   const marketplaceApi = useMarketplaceApi();
   const realtimeApi = useRealtimeApi();
 
-  // Stable connection-status derived from the provider
-  const isConnected = realtimeApi.isConnected;
+  // Reactive connection status (issue #526).
+  // isConnected updates on every connect/disconnect transition without polling.
+  const { isConnected, error: realtimeStatusError } = useRealtimeStatus();
 
   useEffect(() => {
     marketplaceApi.fetchListings().then((data) => {
@@ -150,9 +151,6 @@ function MarketplacePageContent() {
   // discards stale, duplicate, and out-of-order deliveries so bidCount only
   // moves for genuinely new bids (issue #526).
   useEffect(() => {
-    // Clear any previous realtime error when we (re-)subscribe (issue #526).
-    setRealtimeError(null);
-
     const unsubscribe = realtimeApi.onBidUpdate((update) => {
       setLastUpdate(update.timestamp);
       setListings((prev) =>
@@ -166,6 +164,12 @@ function MarketplacePageContent() {
 
     return unsubscribe;
   }, [realtimeApi]);
+
+  // Sync the reactive realtime error into local state so the banner renders
+  // (issue #526).
+  useEffect(() => {
+    setRealtimeError(realtimeStatusError);
+  }, [realtimeStatusError]);
 
   // Apply a bid the local user just placed using the same monotonic guard as
   // realtime updates. This prevents a racing websocket echo from double-
