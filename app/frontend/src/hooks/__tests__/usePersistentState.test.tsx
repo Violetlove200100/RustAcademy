@@ -1,5 +1,6 @@
 import { renderHook, act } from "@testing-library/react";
-import { usePersistentState } from "../hooks/usePersistentState";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { usePersistentState } from "../usePersistentState";
 
 describe("usePersistentState", () => {
   const TEST_KEY = "test_key";
@@ -7,7 +8,7 @@ describe("usePersistentState", () => {
 
   beforeEach(() => {
     localStorage.clear();
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   it("should initialize with initial value if local storage is empty", () => {
@@ -59,7 +60,7 @@ describe("usePersistentState", () => {
 
   it("should sync to backend if provided", async () => {
     const USER_ID = "user_123";
-    const syncToBackend = jest.fn().mockResolvedValue(undefined);
+    const syncToBackend = vi.fn().mockResolvedValue(undefined);
 
     const { result } = renderHook(() =>
       usePersistentState(TEST_KEY, INITIAL_VALUE, {
@@ -76,7 +77,7 @@ describe("usePersistentState", () => {
   });
 
   it("should handle custom serialization and deserialization", () => {
-    const serialize = (val: any) => `CUSTOM-${val.count}`;
+    const serialize = (val: { count: number }) => `CUSTOM-${val.count}`;
     const deserialize = (str: string) => ({ count: parseInt(str.replace("CUSTOM-", ""), 10) });
 
     const { result } = renderHook(() =>

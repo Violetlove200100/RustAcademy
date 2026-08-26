@@ -1,79 +1,44 @@
-/**
- * useMarketData
- *
- * Composite hook that combines marketplace data fetching with realtime bid
- * update subscriptions via the RealtimeApiProvider pattern.
- *
- * Lifecycle hardening (issue #526):
- *   - Subscriptions are registered for each listing after the initial fetch
- *     and are cleaned up on unmount or when the provider changes.
- *   - The subscription effect reads listing IDs from a ref so that incoming
- *     bid updates (which update the listings state) do NOT re-trigger the
- *     subscribe/unsubscribe cycle — preventing a flood of duplicate
- *     subscription calls on every price change.
- *   - onBidUpdate uses applyBidUpdate (lib/bidUpdates.ts) which discards
- *     stale, duplicate, and out-of-order deliveries; bidCount only advances
- *     for genuinely new bids.
- *   - applyLocalBid applies the same monotonic guard to bids the local user
- *     places so a racing websocket echo cannot double-count them.
- *   - The realtime error state is cleared on each (re-)subscription so stale
- *     error banners disappear when the connection recovers.
- *
- * Usage:
- *   // In a component wrapped by <MarketplaceApiProvider> and <RealtimeApiProvider>
- *   const { listings, loading, lastUpdate, realtimeError, applyBid } = useMarketData();
- */
-
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import type { MarketplaceListing } from "@/hooks/marketplaceApi";
 import { useMarketplaceApi } from "@/hooks/MarketplaceApiContext";
 import { useRealtimeApi } from "@/hooks/RealtimeApiContext";
+import type { RealtimeConnectionState } from "@/hooks/realtimeApi";
 import { applyBidUpdate, applyLocalBid } from "@/lib/bidUpdates";
 
 export type UseMarketDataResult = {
-  /** Current listing state, kept up-to-date by realtime bid events. */
   listings: MarketplaceListing[];
-  /** True while the initial fetch is in-flight. */
   loading: boolean;
-  /** Timestamp of the most recent realtime bid update, or null if none received yet. */
   lastUpdate: Date | null;
-  /**
-   * Non-null when the realtime provider has surfaced an error.
-   * Reset to null on each (re-)subscription so stale errors clear automatically
-   * when the connection recovers.
-   */
   realtimeError: string | null;
-  /**
-   * Apply a bid placed by the local user.  Uses the same monotonic guard as
-   * realtime updates so the later websocket echo of this bid is silently
-   * discarded rather than double-counted.
-   */
+  isConnected: boolean;
+  connectionState: RealtimeConnectionState;
   applyBid: (username: string, amount: number) => void;
 };
 
+/**
+ * Fetches marketplace data and owns its realtime subscription lifecycle.
+ * Listing IDs, rather than the changing listing objects, drive the
+ * subscription effect so bid updates cannot cause subscription storms.
+ */
 export function useMarketData(): UseMarketDataResult {
   const [listings, setListings] = useState<MarketplaceListing[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [realtimeError, setRealtimeError] = useState<string | null>(null);
-
-  /**
-   * Ref that always holds the latest listings array (issue #526).
-   * The subscription effect reads IDs from here so that incoming bid updates
-   * (which mutate the listings state) do NOT invalidate the effect and
-   * trigger a fresh subscribe/unsubscribe cycle.
-   */
-  const listingsRef = useRef<MarketplaceListing[]>([]);
-  useEffect(() => {
-    listingsRef.current = listings;
-  }, [listings]);
+  const [connectionState, setConnectionState] = useState<RealtimeConnectionState>(
+    "disconnected",
+  );
 
   const marketplaceApi = useMarketplaceApi();
   const realtimeApi = useRealtimeApi();
 
-  // ── Initial data fetch ────────────────────────────────────────────────────
+  const listingIds = useMemo(
+    () => listings.map((listing) => listing.id),
+    [listings],
+  );
+  const listingIdsKey = listingIds.join("\u0000");
 
   useEffect(() => {
     let cancelled = false;
@@ -82,16 +47,14 @@ export function useMarketData(): UseMarketDataResult {
     marketplaceApi
       .fetchListings()
       .then((data) => {
-        if (!cancelled) {
-          setListings(data);
-          setLoading(false);
-        }
+        if (cancelled) return;
+        setListings(data);
+        setLoading(false);
       })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setLoading(false);
-          console.error("[useMarketData] Failed to fetch listings:", err);
-        }
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setLoading(false);
+        console.error("[useMarketData] Failed to fetch listings:", error);
       });
 
     return () => {
@@ -99,33 +62,44 @@ export function useMarketData(): UseMarketDataResult {
     };
   }, [marketplaceApi]);
 
-  // ── Realtime subscriptions ────────────────────────────────────────────────
-
-  // Subscribe to listing-level updates once after the initial load. We read
-  // IDs from the ref so bid-driven state updates do NOT re-trigger the effect
-  // and flood the server with subscribe/unsubscribe calls (issue #526).
   useEffect(() => {
-    const ids = listingsRef.current.map((l) => l.id);
-    if (ids.length === 0) return;
+    const currentState = realtimeApi.connectionState ??
+      (realtimeApi.isConnected ? "connected" : "disconnected");
+    setConnectionState(currentState);
 
-    ids.forEach((id) => realtimeApi.subscribeToListing(id));
+    const unsubscribeState = realtimeApi.onConnectionStateChange?.((state) => {
+      setConnectionState(state);
+      if (state === "connected") setRealtimeError(null);
+      if (state === "disconnected") {
+        setRealtimeError((current) => current ?? "Connection lost. Retrying…");
+      }
+    });
+    const unsubscribeError = realtimeApi.onError?.((error) => {
+      setRealtimeError(error.message || "Realtime connection failed.");
+    });
+
     return () => {
-      ids.forEach((id) => realtimeApi.unsubscribeFromListing(id));
+      unsubscribeState?.();
+      unsubscribeError?.();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [realtimeApi, loading]); // re-run when the provider changes or after initial load
+  }, [realtimeApi]);
 
-  // Register the bid-update callback (issue #526):
-  //   - applyBidUpdate discards stale / duplicate / out-of-order deliveries.
-  //   - The error state is cleared on each (re-)subscription so stale banners
-  //     disappear automatically when the connection recovers.
   useEffect(() => {
-    setRealtimeError(null);
+    if (listingIds.length === 0) return;
 
+    listingIds.forEach((id) => realtimeApi.subscribeToListing(id));
+    return () => {
+      listingIds.forEach((id) => realtimeApi.unsubscribeFromListing(id));
+    };
+    // listingIdsKey changes only when the set/order of listing IDs changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [realtimeApi, listingIdsKey]);
+
+  useEffect(() => {
     const unsubscribe = realtimeApi.onBidUpdate((update) => {
       setLastUpdate(update.timestamp);
-      setListings((prev) =>
-        applyBidUpdate(prev, {
+      setListings((currentListings) =>
+        applyBidUpdate(currentListings, {
           listingId: update.listingId,
           newBid: update.newBid,
           bidCount: update.bidCount,
@@ -136,11 +110,19 @@ export function useMarketData(): UseMarketDataResult {
     return unsubscribe;
   }, [realtimeApi]);
 
-  // ── Local bid application ─────────────────────────────────────────────────
-
   const applyBid = useCallback((username: string, amount: number) => {
-    setListings((prev) => applyLocalBid(prev, username, amount));
+    setListings((currentListings) =>
+      applyLocalBid(currentListings, username, amount),
+    );
   }, []);
 
-  return { listings, loading, lastUpdate, realtimeError, applyBid };
+  return {
+    listings,
+    loading,
+    lastUpdate,
+    realtimeError,
+    isConnected: connectionState === "connected",
+    connectionState,
+    applyBid,
+  };
 }

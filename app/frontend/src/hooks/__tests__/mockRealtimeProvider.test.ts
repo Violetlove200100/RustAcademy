@@ -73,6 +73,7 @@ describe("subscribe / unsubscribe", () => {
 describe("onBidUpdate", () => {
   it("calls the callback when triggerBidUpdate is invoked", () => {
     const cb = vi.fn();
+    provider.connect();
     provider.onBidUpdate(cb);
     provider.triggerBidUpdate(SAMPLE_UPDATE);
 
@@ -83,6 +84,7 @@ describe("onBidUpdate", () => {
   it("supports multiple listeners", () => {
     const cb1 = vi.fn();
     const cb2 = vi.fn();
+    provider.connect();
     provider.onBidUpdate(cb1);
     provider.onBidUpdate(cb2);
     provider.triggerBidUpdate(SAMPLE_UPDATE);
@@ -93,6 +95,7 @@ describe("onBidUpdate", () => {
 
   it("returns an unsubscribe function that removes the listener", () => {
     const cb = vi.fn();
+    provider.connect();
     const unsub = provider.onBidUpdate(cb);
 
     unsub(); // remove before any update
@@ -104,6 +107,7 @@ describe("onBidUpdate", () => {
   it("does not call unsubscribed listener while other listeners still receive updates", () => {
     const cb1 = vi.fn();
     const cb2 = vi.fn();
+    provider.connect();
     const unsub1 = provider.onBidUpdate(cb1);
     provider.onBidUpdate(cb2);
 
@@ -116,6 +120,7 @@ describe("onBidUpdate", () => {
 
   it("delivers the exact update object to all listeners", () => {
     const received: BidUpdate[] = [];
+    provider.connect();
     provider.onBidUpdate((u) => received.push(u));
 
     const update: BidUpdate = {

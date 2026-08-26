@@ -11,6 +11,9 @@
  * concrete provider directly.
  */
 
+import { mockMarketplaceProvider } from "@/hooks/providers/mockMarketplaceProvider";
+import { productionMarketplaceProvider } from "@/hooks/providers/productionMarketplaceProvider";
+
 // ── Domain types ────────────────────────────────────────────────────────────
 
 export type UsernameStatus = "auction" | "buyNow" | "sold" | "listed";
@@ -77,3 +80,15 @@ export interface MarketplaceApiProvider {
    */
   formatCountdown(date: Date): string;
 }
+
+// Backwards-compatible functions for pages that predate the provider context.
+// New components should use useMarketplaceApi() so the provider can be injected.
+const legacyProvider =
+  process.env.NEXT_PUBLIC_API_MOCK === "true" || process.env.NODE_ENV === "test"
+    ? mockMarketplaceProvider
+    : productionMarketplaceProvider;
+
+export const fetchListings = () => legacyProvider.fetchListings();
+export const fetchUserBids = () => legacyProvider.fetchUserBids();
+export const fetchUserListings = () => legacyProvider.fetchUserListings();
+export const formatCountdown = (date: Date) => legacyProvider.formatCountdown(date);

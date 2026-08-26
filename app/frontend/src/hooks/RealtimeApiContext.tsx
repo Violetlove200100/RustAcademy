@@ -29,7 +29,6 @@ import {
   createContext,
   useContext,
   useEffect,
-  useRef,
   type ReactNode,
 } from "react";
 import type { RealtimeApiProvider } from "@/hooks/realtimeApi";
@@ -69,16 +68,10 @@ export function RealtimeApiProvider({
   provider = defaultProvider,
   children,
 }: RealtimeApiProviderProps) {
-  // Keep a stable ref so the effect doesn't re-run if the prop identity changes.
-  const providerRef = useRef(provider);
-  providerRef.current = provider;
-
   useEffect(() => {
-    providerRef.current.connect();
-    return () => {
-      providerRef.current.disconnect();
-    };
-  }, []); // intentionally empty — connect once on mount
+    provider.connect();
+    return () => provider.disconnect();
+  }, [provider]);
 
   return (
     <RealtimeApiContext.Provider value={provider}>

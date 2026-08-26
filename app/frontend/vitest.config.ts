@@ -11,7 +11,6 @@ export default defineConfig({
       "src/**/__tests__/**/*.{ts,tsx}",
       "__tests__/**/*.{ts,tsx}",
     ],
-    setupFiles: [],
   },
   esbuild: {
     // Enable the React 17+ automatic JSX transform so tests don't need
