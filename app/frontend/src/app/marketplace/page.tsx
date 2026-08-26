@@ -1,18 +1,16 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { UsernameCard } from "@/components/UsernameCard";
 import { ListingDetailModal } from "@/components/ListingDetailModal";
 import type { MarketplaceListing } from "@/hooks/marketplaceApi";
-import { useMarketplaceApi } from "@/hooks/MarketplaceApiContext";
-import { useRealtimeApi } from "@/hooks/RealtimeApiContext";
 import { useWatchlist } from "@/contexts/WatchlistContext";
 import Link from "next/link";
 import { WatchlistProvider } from "@/contexts/WatchlistContext";
 import { MarketplaceApiProvider } from "@/hooks/MarketplaceApiContext";
 import { RealtimeApiProvider } from "@/hooks/RealtimeApiContext";
-import { applyBidUpdate, applyLocalBid } from "@/lib/bidUpdates";
+import { useMarketData } from "@/hooks/useMarketData";
 
 const BidModal = dynamic(
   () => import("@/components/BidModal").then((mod) => mod.BidModal),
@@ -79,29 +77,15 @@ function StatsBar({ listings }: { listings: MarketplaceListing[] }) {
 }
 
 function MarketplacePageContent() {
-  const [listings, setListings] = useState<MarketplaceListing[]>([]);
-  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState<Category>("all");
   const [sortKey, setSortKey] = useState("ending");
   const [activeListingId, setActiveListingId] = useState<string | null>(null);
   const [detailListingId, setDetailListingId] = useState<string | null>(null);
-  // Single declaration — the duplicate was removed (issue #526).
   const [showWatchlistOnly, setShowWatchlistOnly] = useState(false);
-  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
-  /** Non-null when the realtime provider has surfaced an error (issue #526). */
-  const [realtimeError, setRealtimeError] = useState<string | null>(null);
 
-  /**
-   * Ref that always holds the latest listings array (issue #526).
-   * Effects that need the current listings value but should NOT re-run
-   * when listings changes can read from this ref instead of closing over
-   * the state variable.
-   */
-  const listingsRef = useRef<MarketplaceListing[]>([]);
-  useEffect(() => {
-    listingsRef.current = listings;
-  }, [listings]);
+  const { listings, loading, lastUpdate, realtimeError, isConnected, applyBid } =
+    useMarketData();
 
   // Modals hold a listing id, not a snapshot, so realtime bid updates keep
   // the open modal (current bid, minimum bid) from going stale.
@@ -116,66 +100,11 @@ function MarketplacePageContent() {
 
   const { watchlist, isInWatchlist, toggleWatchlist } = useWatchlist();
 
-  // Consume providers from context — no direct imports of concrete providers
-  const marketplaceApi = useMarketplaceApi();
-  const realtimeApi = useRealtimeApi();
-
-  // Stable connection-status derived from the provider
-  const isConnected = realtimeApi.isConnected;
-
-  useEffect(() => {
-    marketplaceApi.fetchListings().then((data) => {
-      setListings(data);
-      setLoading(false);
-    }).catch((err: unknown) => {
-      setLoading(false);
-      console.error("[MarketplacePage] Failed to fetch listings:", err);
-    });
-  }, [marketplaceApi]);
-
-  // Subscribe to each listing once after the initial fetch.
-  // We read listing IDs from the ref so this effect only runs when the
-  // realtimeApi instance changes — not on every bid update (issue #526).
-  useEffect(() => {
-    const ids = listingsRef.current.map((l) => l.id);
-    if (ids.length === 0) return;
-    ids.forEach((id) => realtimeApi.subscribeToListing(id));
-    return () => {
-      ids.forEach((id) => realtimeApi.unsubscribeFromListing(id));
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [realtimeApi, loading]); // re-run when the provider changes or after the initial load
-
-  // Handle real-time bid updates. applyBidUpdate (from lib/bidUpdates.ts)
-  // discards stale, duplicate, and out-of-order deliveries so bidCount only
-  // moves for genuinely new bids (issue #526).
-  useEffect(() => {
-    // Clear any previous realtime error when we (re-)subscribe (issue #526).
-    setRealtimeError(null);
-
-    const unsubscribe = realtimeApi.onBidUpdate((update) => {
-      setLastUpdate(update.timestamp);
-      setListings((prev) =>
-        applyBidUpdate(prev, {
-          listingId: update.listingId,
-          newBid: update.newBid,
-          bidCount: update.bidCount,
-        }),
-      );
-    });
-
-    return unsubscribe;
-  }, [realtimeApi]);
-
-  // Apply a bid the local user just placed using the same monotonic guard as
-  // realtime updates. This prevents a racing websocket echo from double-
-  // counting the bid, and stops a higher realtime update from being regressed
-  // by the local bid amount (issue #526).
   const handleBidSuccess = useCallback(
     (username: string, amount: number) => {
-      setListings((prev) => applyLocalBid(prev, username, amount));
+      applyBid(username, amount);
     },
-    [],
+    [applyBid],
   );
 
   function handleOpenBid(listing: MarketplaceListing) {

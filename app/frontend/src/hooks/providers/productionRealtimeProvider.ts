@@ -1,27 +1,17 @@
 /**
  * Production realtime provider.
  *
- * Connects to the real RustAcademy WebSocket server (Socket.io).
- * The TODO stubs below should be replaced with actual Socket.io calls
- * once the server contract is finalised.
- *
- * Environment variable:
- *   NEXT_PUBLIC_WS_URL — WebSocket server URL (e.g. wss://api.rustacademy.xyz)
- *   Defaults to ws://localhost:4000 when unset.
- *
- * Lifecycle hardening (issue #526):
- *   - connect() is idempotent: calling it while connected or while a
- *     reconnect is in flight is a no-op.
- *   - disconnect() cancels any pending reconnect timer so dead handlers
- *     cannot fire after the provider is torn down.
- *   - onBidUpdate returns an unsubscribe function; the listeners array is
- *     cleared on disconnect to prevent stale callbacks accumulating across
- *     reconnects.
- *   - Reconnect uses exponential back-off (1 s → 2 s → 4 s … capped at 30 s)
- *     and reports the failure via errorReporter after every attempt.
+ * The transport is deliberately injected so lifecycle behavior can be tested
+ * without a network connection. The default transport is the browser's native
+ * WebSocket; the server protocol is JSON messages shaped as
+ * `{ event, payload }`.
  */
 
-import type { BidUpdate, RealtimeApiProvider } from "@/hooks/realtimeApi";
+import type {
+  BidUpdate,
+  RealtimeApiProvider,
+  RealtimeConnectionState,
+} from "@/hooks/realtimeApi";
 import { errorReporter } from "@/lib/errorReporter";
 
 const getWsUrl = (): string =>
@@ -30,146 +20,337 @@ const getWsUrl = (): string =>
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 
+export type RealtimeSocket = {
+  onopen: ((event: Event) => void) | null;
+  onclose: ((event: CloseEvent) => void) | null;
+  onerror: ((event: Event) => void) | null;
+  onmessage: ((event: MessageEvent) => void) | null;
+  send: (data: string) => void;
+  close: () => void;
+};
+
+export type ProductionRealtimeProviderOptions = {
+  webSocketFactory?: (url: string) => RealtimeSocket;
+  reconnectBaseMs?: number;
+  reconnectMaxMs?: number;
+};
+
+function createBrowserSocket(url: string): RealtimeSocket {
+  if (typeof WebSocket === "undefined") {
+    throw new Error("Realtime WebSocket is unavailable in this environment.");
+  }
+
+  return new WebSocket(url);
+}
+
+function asError(value: unknown, fallback: string): Error {
+  if (value instanceof Error) return value;
+  if (typeof value === "string" && value.length > 0) return new Error(value);
+  return new Error(fallback);
+}
+
+/**
+ * A single reconnecting transport with one listener registry. A transport
+ * failure does not clear application listeners or listing subscriptions: those
+ * are intentionally replayed on the next successful connection. An explicit
+ * disconnect is a terminal teardown and clears both registries.
+ */
 export class ProductionRealtimeProvider implements RealtimeApiProvider {
   private listeners: ((update: BidUpdate) => void)[] = [];
-  private subscribedListings: Set<string> = new Set();
-  private _isConnected = false;
-  private _isConnecting = false;
-
-  // TODO: replace `unknown` with the actual Socket.io client type once
-  //       socket.io-client is imported: `import { Socket } from "socket.io-client"`
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private socket: any = null;
-
-  /** Tracks the pending setTimeout handle for reconnect back-off. */
+  private connectionListeners: ((state: RealtimeConnectionState) => void)[] = [];
+  private errorListeners: ((error: Error) => void)[] = [];
+  private subscribedListings = new Set<string>();
+  private socket: RealtimeSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Number of consecutive failed connect attempts, used for back-off. */
   private reconnectAttempt = 0;
+  private lifecycleToken = 0;
+  private stopping = false;
+  private _connectionState: RealtimeConnectionState = "disconnected";
+  private readonly webSocketFactory: (url: string) => RealtimeSocket;
+  private readonly reconnectBaseMs: number;
+  private readonly reconnectMaxMs: number;
+
+  constructor(options: ProductionRealtimeProviderOptions = {}) {
+    this.webSocketFactory = options.webSocketFactory ?? createBrowserSocket;
+    this.reconnectBaseMs = options.reconnectBaseMs ?? BACKOFF_BASE_MS;
+    this.reconnectMaxMs = options.reconnectMaxMs ?? BACKOFF_MAX_MS;
+  }
 
   connect(): void {
-    // Guard: already connected or in the middle of connecting.
-    if (this._isConnected || this._isConnecting) return;
+    this.stopping = false;
+    this.clearReconnectTimer();
 
-    this._isConnecting = true;
+    if (
+      this._connectionState === "connected" ||
+      this._connectionState === "connecting"
+    ) {
+      return;
+    }
 
-    // TODO: replace with real Socket.io initialisation, e.g.
-    //   import { io } from "socket.io-client";
-    //   this.socket = io(getWsUrl(), { transports: ["websocket"] });
-    //   this.socket.on("connect", () => {
-    //     this._isConnected = true;
-    //     this._isConnecting = false;
-    //     this.reconnectAttempt = 0;
-    //     // Re-subscribe to listings that were tracked before reconnect
-    //     this.subscribedListings.forEach((id) =>
-    //       this.socket?.emit("marketplace:subscribe", { listingId: id }),
-    //     );
-    //   });
-    //   this.socket.on("disconnect", (reason: string) => {
-    //     this._isConnected = false;
-    //     this._scheduleReconnect(new Error(`Socket disconnected: ${reason}`));
-    //   });
-    //   this.socket.on("connect_error", (err: Error) => {
-    //     this._isConnecting = false;
-    //     this._scheduleReconnect(err);
-    //   });
-    //   this.socket.on("bid:update", (update: BidUpdate) => { this._notify(update); });
-    console.warn(
-      `[ProductionRealtimeProvider] connect() called — ws url: ${getWsUrl()}. Socket.io not yet wired.`,
-    );
+    const token = ++this.lifecycleToken;
+    this.setConnectionState("connecting");
 
-    // Optimistic until real socket is wired; reset connecting flag.
-    this._isConnected = true;
-    this._isConnecting = false;
-    this.reconnectAttempt = 0;
+    try {
+      const socket = this.webSocketFactory(getWsUrl());
+      this.socket = socket;
+      socket.onopen = () => {
+        if (!this.isCurrentSocket(socket, token)) return;
+
+        this.reconnectAttempt = 0;
+        this.setConnectionState("connected");
+        this.subscribedListings.forEach((listingId) =>
+          this.sendEvent("marketplace:subscribe", { listingId }),
+        );
+      };
+      socket.onmessage = (event) => {
+        if (this.isCurrentSocket(socket, token)) {
+          this.handleMessage(event.data);
+        }
+      };
+      socket.onerror = (event) => {
+        if (!this.isCurrentSocket(socket, token)) return;
+        this.failConnection(
+          asError(event, "Realtime WebSocket connection failed."),
+          socket,
+          token,
+        );
+      };
+      socket.onclose = (event) => {
+        if (!this.isCurrentSocket(socket, token)) return;
+        this.failConnection(
+          new Error(
+            event.reason
+              ? `Realtime WebSocket closed: ${event.reason}`
+              : "Realtime WebSocket connection closed.",
+          ),
+          socket,
+          token,
+        );
+      };
+    } catch (error) {
+      this.failConnection(asError(error, "Unable to create realtime connection."), null, token);
+    }
   }
 
   disconnect(): void {
-    // Cancel any pending reconnect so it can't fire after teardown.
-    if (this.reconnectTimer !== null) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-
-    // TODO: this.socket?.disconnect();
-    this._isConnected = false;
-    this._isConnecting = false;
-    this.socket = null;
+    this.stopping = true;
+    this.lifecycleToken += 1;
+    this.clearReconnectTimer();
+    this.detachAndCloseSocket();
     this.reconnectAttempt = 0;
+    this.setConnectionState("disconnected");
 
-    // Clear all listeners to prevent stale callbacks from accumulating
-    // across reconnects (issue #526).
+    // Explicit teardown must not retain callbacks or subscriptions belonging
+    // to an unmounted page. Automatic reconnects never call this method.
     this.listeners = [];
+    this.connectionListeners = [];
+    this.errorListeners = [];
+    this.subscribedListings.clear();
   }
 
   subscribeToListing(listingId: string): void {
     this.subscribedListings.add(listingId);
-    // TODO: this.socket?.emit("marketplace:subscribe", { listingId });
+    if (this._connectionState === "connected") {
+      this.sendEvent("marketplace:subscribe", { listingId });
+    }
   }
 
   unsubscribeFromListing(listingId: string): void {
     this.subscribedListings.delete(listingId);
-    // TODO: this.socket?.emit("marketplace:unsubscribe", { listingId });
+    if (this._connectionState === "connected") {
+      this.sendEvent("marketplace:unsubscribe", { listingId });
+    }
   }
 
   onBidUpdate(callback: (update: BidUpdate) => void): () => void {
-    // Guard against duplicate registrations of the exact same function
-    // reference (e.g. when connect() is called more than once without an
-    // intervening disconnect in future real-socket paths).
-    if (this.listeners.includes(callback)) {
-      return () => this._removeListener(callback);
+    if (!this.listeners.includes(callback)) {
+      this.listeners.push(callback);
     }
 
-    this.listeners.push(callback);
-    return () => this._removeListener(callback);
+    return () => {
+      const index = this.listeners.indexOf(callback);
+      if (index >= 0) this.listeners.splice(index, 1);
+    };
+  }
+
+  onConnectionStateChange(
+    callback: (state: RealtimeConnectionState) => void,
+  ): () => void {
+    if (!this.connectionListeners.includes(callback)) {
+      this.connectionListeners.push(callback);
+    }
+    callback(this._connectionState);
+
+    return () => {
+      const index = this.connectionListeners.indexOf(callback);
+      if (index >= 0) this.connectionListeners.splice(index, 1);
+    };
+  }
+
+  onError(callback: (error: Error) => void): () => void {
+    if (!this.errorListeners.includes(callback)) {
+      this.errorListeners.push(callback);
+    }
+
+    return () => {
+      const index = this.errorListeners.indexOf(callback);
+      if (index >= 0) this.errorListeners.splice(index, 1);
+    };
   }
 
   get isConnected(): boolean {
-    return this._isConnected;
+    return this._connectionState === "connected";
   }
 
-  // ── Private helpers ────────────────────────────────────────────────────────
-
-  private _removeListener(callback: (update: BidUpdate) => void): void {
-    const idx = this.listeners.indexOf(callback);
-    if (idx > -1) this.listeners.splice(idx, 1);
+  get connectionState(): RealtimeConnectionState {
+    return this._connectionState;
   }
 
-  private _notify(update: BidUpdate): void {
-    // Iterate over a snapshot so that unsubscribing inside a callback is safe.
-    [...this.listeners].forEach((cb) => cb(update));
+  private isCurrentSocket(socket: RealtimeSocket, token: number): boolean {
+    return !this.stopping && token === this.lifecycleToken && this.socket === socket;
   }
 
-  /**
-   * Schedule a reconnect attempt with exponential back-off.
-   * Reports each failure to errorReporter so it surfaces in telemetry.
-   */
-  private _scheduleReconnect(cause: Error): void {
-    this._isConnected = false;
-    this._isConnecting = false;
+  private setConnectionState(state: RealtimeConnectionState): void {
+    if (this._connectionState === state) return;
+    this._connectionState = state;
+    [...this.connectionListeners].forEach((callback) => callback(state));
+  }
+
+  private emitError(error: Error): void {
+    errorReporter.reportRealtimeError(error, {
+      extra: {
+        wsUrl: getWsUrl(),
+        attempt: this.reconnectAttempt + 1,
+      },
+    });
+    [...this.errorListeners].forEach((callback) => callback(error));
+  }
+
+  private failConnection(
+    cause: Error,
+    socket: RealtimeSocket | null,
+    token: number,
+  ): void {
+    if (this.stopping || token !== this.lifecycleToken) return;
+
+    if (socket && this.socket === socket) {
+      this.detachAndCloseSocket(socket);
+    }
+    this.socket = null;
+    this.setConnectionState("disconnected");
+    this.emitError(cause);
+    this.scheduleReconnect(cause);
+  }
+
+  private scheduleReconnect(cause: Error): void {
+    if (this.stopping || this.reconnectTimer !== null) return;
 
     const delayMs = Math.min(
-      BACKOFF_BASE_MS * 2 ** this.reconnectAttempt,
-      BACKOFF_MAX_MS,
+      this.reconnectBaseMs * 2 ** this.reconnectAttempt,
+      this.reconnectMaxMs,
     );
     this.reconnectAttempt += 1;
 
-    errorReporter.reportRealtimeError(cause, {
-      extra: {
-        wsUrl: getWsUrl(),
-        attempt: this.reconnectAttempt,
-        nextRetryMs: delayMs,
-      },
-    });
-
     console.warn(
-      `[ProductionRealtimeProvider] Connection lost. Reconnecting in ${delayMs}ms (attempt ${this.reconnectAttempt}).`,
+      `[ProductionRealtimeProvider] Reconnecting in ${delayMs}ms (attempt ${this.reconnectAttempt}).`,
       cause,
     );
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.connect();
+      if (!this.stopping) this.connect();
     }, delayMs);
+  }
+
+  private detachAndCloseSocket(socket = this.socket): void {
+    if (!socket) return;
+    socket.onopen = null;
+    socket.onclose = null;
+    socket.onerror = null;
+    socket.onmessage = null;
+    try {
+      socket.close();
+    } catch {
+      // The transport is already closed; teardown remains complete.
+    }
+    if (this.socket === socket) this.socket = null;
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer === null) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  private sendEvent(event: string, payload: Record<string, string>): void {
+    if (!this.socket || this._connectionState !== "connected") return;
+    try {
+      this.socket.send(JSON.stringify({ event, payload }));
+    } catch (error) {
+      this.failConnection(
+        asError(error, "Unable to send realtime subscription."),
+        this.socket,
+        this.lifecycleToken,
+      );
+    }
+  }
+
+  private handleMessage(data: unknown): void {
+    let message: unknown = data;
+    if (typeof data === "string") {
+      try {
+        message = JSON.parse(data) as unknown;
+      } catch {
+        return;
+      }
+    }
+
+    if (!message || typeof message !== "object") return;
+    const envelope = message as Record<string, unknown>;
+    const eventName = envelope.event ?? envelope.type;
+    if (eventName && eventName !== "bid:update") return;
+
+    const candidate =
+      envelope.payload && typeof envelope.payload === "object"
+        ? envelope.payload
+        : envelope.data && typeof envelope.data === "object"
+          ? envelope.data
+          : envelope;
+    if (!candidate || typeof candidate !== "object") return;
+
+    const update = candidate as Record<string, unknown>;
+    if (
+      typeof update.listingId !== "string" ||
+      typeof update.username !== "string" ||
+      typeof update.newBid !== "number" ||
+      typeof update.bidderAddress !== "string"
+    ) {
+      return;
+    }
+
+    const timestamp =
+      update.timestamp instanceof Date
+        ? update.timestamp
+        : new Date(
+            typeof update.timestamp === "string" || typeof update.timestamp === "number"
+              ? update.timestamp
+              : Date.now(),
+          );
+    if (Number.isNaN(timestamp.getTime())) return;
+
+    this._notify({
+      listingId: update.listingId,
+      username: update.username,
+      newBid: update.newBid,
+      bidderAddress: update.bidderAddress,
+      timestamp,
+      bidCount:
+        typeof update.bidCount === "number" ? update.bidCount : undefined,
+    });
+  }
+
+  private _notify(update: BidUpdate): void {
+    [...this.listeners].forEach((callback) => callback(update));
   }
 }
 

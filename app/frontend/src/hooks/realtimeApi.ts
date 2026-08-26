@@ -9,6 +9,8 @@
  *   hooks/RealtimeApiContext.tsx
  */
 
+export type RealtimeConnectionState = "disconnected" | "connecting" | "connected";
+
 export type BidUpdate = {
   listingId: string;
   username: string;
@@ -47,4 +49,15 @@ export interface RealtimeApiProvider {
 
   /** Whether the connection is currently active. */
   readonly isConnected: boolean;
+
+  /** Current connection lifecycle state, when the provider exposes it. */
+  readonly connectionState?: RealtimeConnectionState;
+
+  /** Observe connection transitions so consumers can render live status. */
+  onConnectionStateChange?: (
+    callback: (state: RealtimeConnectionState) => void,
+  ) => () => void;
+
+  /** Observe transport failures for telemetry and user-visible recovery UI. */
+  onError?: (callback: (error: Error) => void) => () => void;
 }

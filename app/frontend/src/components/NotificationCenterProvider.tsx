@@ -2,6 +2,7 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
   useMemo,
   type ReactNode,
@@ -26,6 +27,7 @@ type NotificationCenterContextValue = {
 
 const NotificationCenterContext =
   createContext<NotificationCenterContextValue | null>(null);
+const SORTED_INITIAL_NOTIFICATIONS = sortNotifications(INITIAL_NOTIFICATIONS);
 
 function mergeStoredNotifications(
   storedNotifications: StoredNotification[],
@@ -57,22 +59,25 @@ export function NotificationCenterProvider({
   children: ReactNode;
   userId?: string;
 }) {
-  const [notifications, setNotifications, hasHydrated] = usePersistentState<StoredNotification[]>(
-    NOTIFICATION_STORAGE_KEY,
-    sortNotifications(INITIAL_NOTIFICATIONS),
-    {
-      userId,
-      deserialize: (str: string) => {
-        try {
-          const parsedValue = JSON.parse(str) as StoredNotification[];
-          return mergeStoredNotifications(parsedValue);
-        } catch (e) {
-          console.error("Unable to parse notifications", e);
-          return sortNotifications(INITIAL_NOTIFICATIONS);
-        }
-      },
+  const deserializeNotifications = useCallback((str: string) => {
+    try {
+      const parsedValue = JSON.parse(str) as StoredNotification[];
+      return mergeStoredNotifications(parsedValue);
+    } catch (error) {
+      console.error("Unable to parse notifications", error);
+      return SORTED_INITIAL_NOTIFICATIONS;
     }
-  );
+  }, []);
+
+  const [notifications, setNotifications, hasHydrated] =
+    usePersistentState<StoredNotification[]>(
+      NOTIFICATION_STORAGE_KEY,
+      SORTED_INITIAL_NOTIFICATIONS,
+      {
+        userId,
+        deserialize: deserializeNotifications,
+      },
+    );
 
   const unreadCount = useMemo(
     () =>
